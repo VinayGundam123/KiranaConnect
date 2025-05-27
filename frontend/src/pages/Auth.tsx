@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import toast from 'react-hot-toast';
-import { signIn, signUp } from '@/lib/auth';
+// import { signIn, signUp } from '@/lib/auth';
 
 const fadeIn = {
   initial: { opacity: 0, y: 20 },
@@ -208,6 +208,7 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
           email: formData.email,
           password: formData.password
         });
+        localStorage.setItem('buyer',JSON.stringify(response.data));
         console.log(response.data);
         // await signIn(formData.email, formData.password);
         toast.success('Login successful!');

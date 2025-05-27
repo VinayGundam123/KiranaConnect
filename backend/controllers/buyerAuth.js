@@ -12,8 +12,9 @@ exports.signUp=async (req, res) => {
         const hash=bcrypt.hashSync(password, 10);
         newBuyer.password =  hash;
         await newBuyer.save();
-        res.status(201).json(newBuyer);
-
+        const { password: _, ...responseBuyer } = newBuyer.toObject();
+        res.status(201).json(responseBuyer);
+        console.log('Buyer signed up successfully:', responseBuyer);
     } catch (error) {
         console.error('Error during sign-up:', error);
         res.status(500).json({ error: 'Internal server error' ,error});
@@ -34,8 +35,9 @@ exports.login=async (req, res) => {
         var token = jwt.sign({ email,id:buyer._id }, process.env.JWT_SECRET);
         buyer.token = token;
         await buyer.save();
-        res.status(200).json({ message: 'Login successful', buyer });
-        
+        const { password: _, ...responseBuyer } = buyer.toObject();
+        res.status(201).json(responseBuyer);
+        console.log('Buyer logged in successfully:', responseBuyer);
     } catch (error) {
         console.error('Error during login:', error);
         res.status(500).json({ error: 'Internal server error' ,error});

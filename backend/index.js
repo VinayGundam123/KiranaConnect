@@ -4,7 +4,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
-const cartRouter = require('./routes/cart');
+const cartRouter = require('./routes/buyerCart');
 const BuyerAuthRouter=require('./routes/buyerAuth');
 
 //MONOGO DB CONNECTION
@@ -14,14 +14,35 @@ async function main() {
   console.log('MongoDB connected');
 }
 
+// Authorization
+const auth=(req,res,next)=>{
+    try{
+        const token=req.get('Authorization').split(' ')[1];
+        var decoded = jwt.verify(token, process.env.JWT_SECRET);
+        
+        if(decoded.email){
+            console.log(decoded)
+            next();
+        }else{
+            res.status(401).json({message:'Unauthorized'});
+        }
+    }
+    catch(err){
+        res.status(401).json({message:'Unauthorized'});
+        // console.log(err)
+    }
+}
+
+
 server.use(cors());
 server.use(express.json());
 server.get('/',(req,res)=>{
     res.send('Hello World');
 });
 
+server.use('/buyer/cart',cartRouter.router);
 server.use('/buyer',BuyerAuthRouter.router);
-server.use('/cart',cartRouter.router);
+
 
 server.listen(5000,()=>{
     console.log(`port ${5000} is activated`);
