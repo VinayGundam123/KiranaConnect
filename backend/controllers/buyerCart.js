@@ -3,6 +3,11 @@ const { Groq } = require("groq-sdk");
 const model = require('../models/buyer');
 const Buyer = model.Buyer;
 
+
+// Configuration for cart abandonment
+const CART_ABANDONMENT_TIME = 300 * 60 * 1000; // 30 minutes in milliseconds
+const CHECK_INTERVAL = 5 * 60 * 1000; // Check every 5 minutes
+
 exports.getAllCartProducts = async (req, res) => {
     try {
         const id = req.params.id;
@@ -218,13 +223,279 @@ exports.clearCart = async (req, res) => {
     }
 };
 
+// New function to check for abandoned carts and send notifications
+exports.checkAbandonedCarts = async () => {
+    try {
+        const currentTime = new Date();
+        const cutoffTime = new Date(currentTime - CART_ABANDONMENT_TIME);
+        
+        // Find buyers with abandoned carts
+        const buyersWithAbandonedCarts = await Buyer.find({
+            'cart.items': { $exists: true, $ne: [] },
+            $or: [
+                { 'cart.lastActivity': { $lt: cutoffTime } },
+                { 'cart.lastActivity': { $exists: false } }
+            ]
+        });
+
+        console.log(`Found ${buyersWithAbandonedCarts.length} buyers with potentially abandoned carts`);
+        
+        for (const buyer of buyersWithAbandonedCarts) {
+            // Check if any items haven't received notification yet
+            const itemsNeedingNotification = buyer.cart.items.filter(item => {
+                const itemCutoffTime = new Date(currentTime - CART_ABANDONMENT_TIME);
+                const itemLastActivity = item.lastUpdated || item.addedAt;
+                return !item.notificationSent && itemLastActivity < itemCutoffTime;
+            });
+
+            if (itemsNeedingNotification.length > 0) {
+                // Generate AI notification for this buyer
+                await generateSmartCartNotification(buyer, itemsNeedingNotification);
+                
+                // Mark items as notified
+                buyer.cart.items.forEach(item => {
+                    const itemLastActivity = item.lastUpdated || item.addedAt;
+                    if (!item.notificationSent && itemLastActivity < new Date(currentTime - CART_ABANDONMENT_TIME)) {
+                        item.notificationSent = true;
+                    }
+                });
+                
+                await buyer.save();
+            }
+        }
+        
+    } catch (error) {
+        console.error('Error checking abandoned carts:', error);
+    }
+};
+
+// Function to generate smart cart notification using AI
+const generateSmartCartNotification = async (buyer, abandonedItems) => {
+    try {
+        // Initialize Groq client
+        const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        
+        // Prepare cart items data
+        const cartItemsDescription = abandonedItems.map(item => 
+            `${item.name} (₹${item.price} x ${item.quantity} ${item.unit}) from ${item.storeName}`
+        ).join(', ');
+        
+        // Get user's recent purchase history (you can enhance this based on your orders schema)
+        const userHistory = buyer.orders && buyer.orders.length > 0 
+            ? buyer.orders.slice(-3).map(order => 
+                `Order on ${order.orderDate}: ${order.items.length} items, ₹${order.totalAmount}`
+              ).join('; ')
+            : 'No previous purchase history';
+        
+        // Create a completion
+        const completion = await groq.chat.completions.create({
+            messages: [
+                { 
+                    role: 'system', 
+                    content: `You are an AI agent for Kirana Connect that helps customers complete their purchases by sending personalized cart abandonment reminders.
+
+                    GUIDELINES:
+                    - Keep messages friendly, personal, and culturally appropriate for Indian customers
+                    - Mention specific items left in cart to create urgency
+                    - For orders above ₹1000, mention 15% discount available
+                    - Include local kirana store benefits (freshness, quick delivery, supporting local business)
+                    - Add gentle urgency without being pushy
+                    
+                    - End with clear call-to-action
+                    - Use Indian rupee (₹) symbol and local context
+                    ` 
+                },
+                { 
+                    role: 'user', 
+                    content: `Customer: ${buyer.name} (${buyer.email})
+                    Abandoned cart items: ${cartItemsDescription}
+                    Purchase history: ${userHistory}
+                    Cart total: ₹${abandonedItems.reduce((sum, item) => sum + (item.price * item.quantity), 0)}
+                    
+                    Generate a personalized cart abandonment message.` 
+                }
+            ],
+            model: "llama-3.3-70b-versatile",
+            temperature: 0.7
+        });
+
+        const aiMessage = completion.choices[0].message.content;
+        
+        // Here you would integrate with your notification system
+        // For now, we'll log the notification and store it
+        console.log(`\n--- SMART CART NOTIFICATION ---`);
+        console.log(`To: ${buyer.name} (${buyer.email})`);
+        console.log(`Message: ${aiMessage}`);
+        console.log(`Items: ${cartItemsDescription}`);
+        console.log(`---------------------------\n`);
+        
+        // Store notification in buyer's record (optional)
+        if (!buyer.notifications) {
+            buyer.notifications = [];
+        }
+        
+        buyer.notifications.push({
+            type: 'cart_abandonment',
+            message: aiMessage,
+            items: abandonedItems.map(item => ({
+                itemId: item.itemId,
+                name: item.name,
+                quantity: item.quantity
+            })),
+            sentAt: new Date(),
+            status: 'sent'
+        });
+        
+        return aiMessage;
+        
+    } catch (error) {
+        console.error('Error generating smart cart notification:', error);
+        return null;
+    }
+};
+
+// API endpoint to manually trigger smart cart notification for a specific user
+exports.triggerSmartCartNotification = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const buyer = await Buyer.findById(id);
+        
+        if (!buyer) {
+            return res.status(404).json({ message: 'Buyer not found' });
+        }
+        
+        if (!buyer.cart.items || buyer.cart.items.length === 0) {
+            return res.status(400).json({ message: 'Cart is empty' });
+        }
+        
+        const notification = await generateSmartCartNotification(buyer, buyer.cart.items);
+        
+        if (notification) {
+            // Mark all items as notified
+            buyer.cart.items.forEach(item => {
+                item.notificationSent = true;
+            });
+            
+            await buyer.save();
+            
+            res.status(200).json({
+                message: 'Smart cart notification generated successfully',
+                notification: notification,
+                cartItems: buyer.cart.items.length
+            });
+        } else {
+            res.status(500).json({ message: 'Failed to generate notification' });
+        }
+        
+    } catch (error) {
+        console.error('Error triggering smart cart notification:', error);
+        res.status(500).json({ 
+            error: 'Internal server error', 
+            details: error.message 
+        });
+    }
+};
+
+// API endpoint to get smart cart insights for a user
+exports.getSmartCartInsights = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const buyer = await Buyer.findById(id);
+        
+        if (!buyer) {
+            return res.status(404).json({ message: 'Buyer not found' });
+        }
+        
+        const currentTime = new Date();
+        const cartInsights = {
+            totalItems: buyer.cart.items.length,
+            totalValue: buyer.cart.totalPrice,
+            oldestItem: null,
+            newestItem: null,
+            itemsNeedingAttention: [],
+            timeSinceLastActivity: null,
+            recommendedAction: 'none'
+        };
+        
+        if (buyer.cart.items.length > 0) {
+            // Find oldest and newest items
+            let oldest = buyer.cart.items[0];
+            let newest = buyer.cart.items[0];
+            
+            buyer.cart.items.forEach(item => {
+                const itemTime = item.addedAt || item.lastUpdated;
+                const oldestTime = oldest.addedAt || oldest.lastUpdated;
+                const newestTime = newest.addedAt || newest.lastUpdated;
+                
+                if (itemTime < oldestTime) oldest = item;
+                if (itemTime > newestTime) newest = item;
+                
+                // Check if item needs attention (older than abandonment time)
+                if (currentTime - itemTime > CART_ABANDONMENT_TIME && !item.notificationSent) {
+                    cartInsights.itemsNeedingAttention.push({
+                        name: item.name,
+                        addedAgo: Math.floor((currentTime - itemTime) / (1000 * 60)) // minutes ago
+                    });
+                }
+            });
+            
+            cartInsights.oldestItem = {
+                name: oldest.name,
+                addedAgo: Math.floor((currentTime - (oldest.addedAt || oldest.lastUpdated)) / (1000 * 60))
+            };
+            
+            cartInsights.newestItem = {
+                name: newest.name,
+                addedAgo: Math.floor((currentTime - (newest.addedAt || newest.lastUpdated)) / (1000 * 60))
+            };
+            
+            // Time since last activity
+            if (buyer.cart.lastActivity) {
+                cartInsights.timeSinceLastActivity = Math.floor((currentTime - buyer.cart.lastActivity) / (1000 * 60));
+            }
+            
+            // Recommend action
+            if (cartInsights.itemsNeedingAttention.length > 0) {
+                cartInsights.recommendedAction = 'send_notification';
+            } else if (cartInsights.totalValue > 1000) {
+                cartInsights.recommendedAction = 'offer_discount';
+            } else if (cartInsights.timeSinceLastActivity > 15) {
+                cartInsights.recommendedAction = 'gentle_reminder';
+            }
+        }
+        
+        res.status(200).json(cartInsights);
+        
+    } catch (error) {
+        console.error('Error getting smart cart insights:', error);
+        res.status(500).json({ 
+            error: 'Internal server error', 
+            details: error.message 
+        });
+    }
+};
+
+// Initialize abandoned cart checker (call this when your server starts)
+exports.initializeAbandonedCartChecker = () => {
+    console.log('Initializing abandoned cart checker...');
+    
+    // Run immediately on startup
+    exports.checkAbandonedCarts();
+    
+    // Then run every CHECK_INTERVAL
+    setInterval(() => {
+        exports.checkAbandonedCarts();
+    }, CHECK_INTERVAL);
+    
+    console.log(`Abandoned cart checker will run every ${CHECK_INTERVAL / 1000 / 60} minutes`);
+};
+
 exports.sendPrompt = async (req, res) => {
     try {
         const { cartItems, userHistory, userDetails } = req.body; // Input from client
         
         // Initialize Groq client
         const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-        
         // Create a completion
         const completion = await groq.chat.completions.create({
             messages: [
