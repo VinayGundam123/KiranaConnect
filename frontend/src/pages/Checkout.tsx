@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useCart } from '@/lib/cart';
-import { Trash2, Plus, Minus, Store, Bell, Clock, Zap, TrendingUp } from 'lucide-react';
+import { Trash2, Plus, Minus, Store, Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import toast from 'react-hot-toast';
@@ -18,37 +18,26 @@ interface CartItem {
   addedAt?: string;
   lastUpdated?: string;
   notificationSent?: boolean;
+  notificationCount?: number;
+  lastNotificationSent?: string;
+  notificationsPaused?: boolean;
+}
+
+interface AINotification {
+  _id?: string;
+  type: string;
+  message: string;
+  itemId: string;
+  itemName: string;
+  notificationCount: number;
+  sentAt: string;
+  status: string;
 }
 
 interface StoreGroup {
   storeName: string;
   items: CartItem[];
   subtotal: number;
-}
-
-interface SmartCartInsights {
-  totalItems: number;
-  totalValue: number;
-  oldestItem: {
-    name: string;
-    addedAgo: number;
-  } | null;
-  newestItem: {
-    name: string;
-    addedAgo: number;
-  } | null;
-  itemsNeedingAttention: Array<{
-    name: string;
-    addedAgo: number;
-  }>;
-  timeSinceLastActivity: number | null;
-  recommendedAction: string;
-}
-
-interface SmartNotification {
-  message: string;
-  type: 'info' | 'warning' | 'success';
-  timestamp: Date;
 }
 
 export function Checkout() {
@@ -59,34 +48,37 @@ export function Checkout() {
   const [updating, setUpdating] = useState<string | null>(null);
   const [clearingCart, setClearingCart] = useState(false);
   
-  // Smart cart features
-  const [smartInsights, setSmartInsights] = useState<SmartCartInsights | null>(null);
-  const [smartNotifications, setSmartNotifications] = useState<SmartNotification[]>([]);
-  const [showSmartFeatures, setShowSmartFeatures] = useState(false);
+  // AI Notifications only
+  const [aiNotifications, setAiNotifications] = useState<AINotification[]>([]);
+  const [showAINotifications, setShowAINotifications] = useState(false);
+  const [newAINotificationCount, setNewAINotificationCount] = useState(0);
   const [generatingNotification, setGeneratingNotification] = useState(false);
+  
+  // Real-time updates for AI notifications
+  const lastNotificationCheck = useRef<Date>(new Date());
 
   // Replace with actual buyer ID from your auth system
-  const buyerId = '683012ca3ed446695c307053';
+  const buyerId = '683092882648c78a89f6b377';
 
   useEffect(() => {
     fetchCartData();
-    fetchSmartInsights();
+    fetchAINotifications();
     
-    // Set up interval to check for smart insights every 2 minutes
-    const interval = setInterval(() => {
-      fetchSmartInsights();
-    }, 120000); // 2 minutes
+    // Check for new AI notifications every 30 seconds
+    const aiCheckInterval = setInterval(() => {
+      checkForNewAINotifications();
+    }, 30000); // 30 seconds interval
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(aiCheckInterval);
+    };
   }, []);
 
   const fetchCartData = async () => {
     try {
       setLoading(true);
       setError(null);
-      
       const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}`);
-      
       if (Array.isArray(response.data)) {
         setCartData(response.data);
       } else {
@@ -102,69 +94,84 @@ export function Checkout() {
     }
   };
 
-  const fetchSmartInsights = async () => {
+  const fetchAINotifications = async () => {
     try {
-      const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}/insights`);
-      setSmartInsights(response.data);
-      
-      // Generate smart notifications based on insights
-      generateSmartNotifications(response.data);
+      const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}/ai-notifications?limit=20`);
+      setAiNotifications(response.data.notifications || []);
     } catch (err) {
-      console.error('Error fetching smart insights:', err);
+      console.error('Error fetching AI notifications:', err);
     }
   };
 
-  const generateSmartNotifications = (insights: SmartCartInsights) => {
-    const notifications: SmartNotification[] = [];
-    
-    if (insights.itemsNeedingAttention.length > 0) {
-      notifications.push({
-        message: `You have ${insights.itemsNeedingAttention.length} items waiting in your cart for over 30 minutes. Complete your purchase to secure them!`,
-        type: 'warning',
-        timestamp: new Date()
-      });
+  const checkForNewAINotifications = async () => {
+    try {
+      const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}/ai-notifications?limit=20`);
+      const newNotifications = response.data.notifications || [];
+      
+      // Check for notifications newer than last check
+      const newOnes = newNotifications.filter(notification => 
+        new Date(notification.sentAt) > lastNotificationCheck.current
+      );
+      
+      if (newOnes.length > 0) {
+        setNewAINotificationCount(prev => prev + newOnes.length);
+        
+        // Show toast for new AI notification
+        newOnes.forEach(notif => {
+          toast.success(`🤖 New AI reminder: ${notif.message}...`, {
+            duration: 5000,
+            position: 'top-right'
+          });
+        });
+        
+        // Update AI notifications list
+        setAiNotifications(newNotifications);
+      }
+      lastNotificationCheck.current = new Date();
+    } catch (err) {
+      console.error('Error checking new AI notifications:', err);
     }
-    
-    if (insights.totalValue > 1000) {
-      notifications.push({
-        message: `🎉 Great news! Your cart qualifies for 15% discount (₹${Math.round(insights.totalValue * 0.15)} off). Complete your order now!`,
-        type: 'success',
-        timestamp: new Date()
-      });
-    }
-    
-    if (insights.recommendedAction === 'gentle_reminder' && insights.totalItems > 0) {
-      notifications.push({
-        message: `Don't forget about your ${insights.totalItems} items! Your local kirana stores are ready to fulfill your order.`,
-        type: 'info',
-        timestamp: new Date()
-      });
-    }
-    
-    setSmartNotifications(notifications);
   };
 
-  const triggerSmartNotification = async () => {
+  const triggerManualAINotification = async () => {
     try {
       setGeneratingNotification(true);
       
       const response = await axios.post(`http://localhost:5000/buyer/cart/${buyerId}/smart-notification`);
-      console.log('Smart notification response:', response.data.notification);
       
       if (response.data.notification) {
-        toast.success('Smart notification generated!');
-        setSmartNotifications(prev => [...prev, {
-          message: response.data.notification + '...',
-          type: 'info',
-          timestamp: new Date()
-        }]);
+        toast.success('🤖 AI notification generated successfully!');
+        // Refresh AI notifications
+        await fetchAINotifications();
       }
       
     } catch (error) {
-      console.error('Error generating smart notification:', error);
-      toast.error('Failed to generate notification');
+      console.error('Error generating AI notification:', error);
+      toast.error('Failed to generate AI notification');
     } finally {
       setGeneratingNotification(false);
+    }
+  };
+
+  const toggleItemNotifications = async (itemId: string, pause: boolean) => {
+    try {
+      const response = await axios.post(`http://localhost:5000/buyer/cart/${buyerId}/toggle-notifications`, {
+        itemId,
+        pause
+      });
+      
+      toast.success(response.data.message);
+      
+      // Update cart data
+      setCartData(prev => prev.map(item => 
+        item.itemId === itemId 
+          ? { ...item, notificationsPaused: pause }
+          : item
+      ));
+      
+    } catch (error) {
+      console.error('Error toggling notifications:', error);
+      toast.error('Failed to update notification settings');
     }
   };
   
@@ -196,9 +203,6 @@ export function Checkout() {
         toast.success('Cart updated successfully');
       }
 
-      // Refresh insights after update
-      setTimeout(fetchSmartInsights, 1000);
-
     } catch (error) {
       console.error('Error updating cart:', error);
       toast.error('Failed to update quantity');
@@ -220,7 +224,6 @@ export function Checkout() {
       setCartData(updatedItems);
       
       toast.success('Item removed from cart');
-      setTimeout(fetchSmartInsights, 1000);
 
     } catch (error) {
       console.error('Error removing item:', error);
@@ -238,8 +241,7 @@ export function Checkout() {
       await axios.delete(`http://localhost:5000/buyer/cart/${buyerId}/clear`);
 
       setCartData([]);
-      setSmartInsights(null);
-      setSmartNotifications([]);
+      setAiNotifications([]);
       
       toast.success('Cart cleared successfully');
 
@@ -249,15 +251,6 @@ export function Checkout() {
       fetchCartData();
     } finally {
       setClearingCart(false);
-    }
-  };
-
-  const formatTimeAgo = (minutes: number) => {
-    if (minutes < 60) {
-      return `${minutes}m ago`;
-    } else {
-      const hours = Math.floor(minutes / 60);
-      return `${hours}h ${minutes % 60}m ago`;
     }
   };
 
@@ -321,31 +314,38 @@ export function Checkout() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      {/* Header with Smart Cart Toggle */}
+      {/* Header with AI Notifications */}
       <div className="flex justify-between items-center mb-8">
         <div className="flex items-center space-x-4">
           <h1 className="text-2xl font-bold text-gray-900">Shopping Cart</h1>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowSmartFeatures(!showSmartFeatures)}
-            className="flex items-center space-x-2"
-          >
-            <Zap className="h-4 w-4" />
-            <span>Smart Cart</span>
-          </Button>
+          {newAINotificationCount > 0 && (
+            <div className="flex items-center space-x-2 px-3 py-1 bg-blue-100 rounded-full">
+              <Bell className="h-4 w-4 text-blue-600" />
+              <span className="text-sm text-blue-600 font-medium">
+                {newAINotificationCount} new AI reminders
+              </span>
+            </div>
+          )}
         </div>
         
         {cartData.length > 0 && (
           <div className="flex space-x-2">
             <Button
               variant="outline"
-              onClick={triggerSmartNotification}
+              onClick={() => setShowAINotifications(!showAINotifications)}
+              className="flex items-center space-x-2"
+            >
+              <Bell className="h-4 w-4" />
+              <span>AI Notifications ({aiNotifications.length})</span>
+            </Button>
+            <Button
+              variant="outline"
+              onClick={triggerManualAINotification}
               disabled={generatingNotification}
               className="flex items-center space-x-2"
             >
               <Bell className="h-4 w-4" />
-              <span>{generatingNotification ? 'Generating...' : 'Smart Reminder'}</span>
+              <span>{generatingNotification ? 'Generating...' : 'Get AI Reminder'}</span>
             </Button>
             <Button
               variant="outline"
@@ -359,66 +359,40 @@ export function Checkout() {
         )}
       </div>
 
-      {/* Smart Cart Features */}
-      {showSmartFeatures && (
-        <div className="mb-8 space-y-4">
-          {/* Smart Notifications */}
-          {smartNotifications.length > 0 && (
-            <div className="space-y-2">
-              {smartNotifications.slice(-2).map((notification, index) => (
-                <Alert key={index} className={`border-l-4 ${
-                  notification.type === 'success' ? 'border-green-500 bg-green-50' :
-                  notification.type === 'warning' ? 'border-yellow-500 bg-yellow-50' :
-                  'border-blue-500 bg-blue-50'
-                }`}>
-                  <Bell className="h-4 w-4" />
-                  <AlertDescription>{notification.message}</AlertDescription>
-                </Alert>
-              ))}
+      {/* AI Notifications Panel */}
+      {showAINotifications && aiNotifications.length > 0 && (
+        <div className="mb-8 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl p-6 border border-blue-100">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center space-x-2">
+              <Bell className="h-5 w-5 text-blue-600" />
+              <h3 className="font-semibold text-gray-900">AI Personalized Notifications</h3>
             </div>
-          )}
-
-          {/* Smart Insights */}
-          {smartInsights && (
-            <div className="bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl p-6 border border-blue-100">
-              <div className="flex items-center space-x-2 mb-4">
-                <TrendingUp className="h-5 w-5 text-blue-600" />
-                <h3 className="font-semibold text-gray-900">Smart Cart Insights</h3>
-              </div>
-              
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-blue-600">{smartInsights.totalItems}</div>
-                  <div className="text-sm text-gray-600">Items</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-green-600">₹{smartInsights.totalValue}</div>
-                  <div className="text-sm text-gray-600">Total Value</div>
-                </div>
-                {smartInsights.oldestItem && (
-                  <div className="text-center">
-                    <div className="text-2xl font-bold text-orange-600">{formatTimeAgo(smartInsights.oldestItem.addedAgo)}</div>
-                    <div className="text-sm text-gray-600">Oldest Item</div>
+            <Button 
+              variant="ghost" 
+              size="sm"
+              onClick={() => setNewAINotificationCount(0)}
+            >
+              Mark as Read
+            </Button>
+          </div>
+          
+          <div className="space-y-3">
+            {aiNotifications.map((notification, index) => (
+              <Alert key={index} className="border-l-4 border-blue-500 bg-white">
+                <Bell className="h-4 w-4" />
+                <AlertDescription>
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="text-sm">{notification.message}</p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        For: {notification.itemName} • {new Date(notification.sentAt).toLocaleString()}
+                      </p>
+                    </div>
                   </div>
-                )}
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-purple-600">{smartInsights.itemsNeedingAttention.length}</div>
-                  <div className="text-sm text-gray-600">Need Attention</div>
-                </div>
-              </div>
-
-              {smartInsights.recommendedAction !== 'none' && (
-                <div className="mt-4 p-3 bg-white rounded-lg border border-blue-200">
-                  <div className="flex items-center space-x-2">
-                    <Zap className="h-4 w-4 text-blue-600" />
-                    <span className="text-sm font-medium text-gray-900">
-                      Recommended Action: {smartInsights.recommendedAction.replace('_', ' ').toUpperCase()}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+                </AlertDescription>
+              </Alert>
+            ))}
+          </div>
         </div>
       )}
 
@@ -435,69 +409,75 @@ export function Checkout() {
               
               {/* Store Items */}
               <div className="divide-y divide-gray-100">
-                {storeData.items.map((item) => {
-                  const addedTime = item.addedAt ? new Date(item.addedAt) : null;
-                  const minutesAgo = addedTime ? Math.floor((Date.now() - addedTime.getTime()) / (1000 * 60)) : null;
-                  const isOld = minutesAgo !== null && minutesAgo > 30;
-                  
-                  return (
-                    <div key={item.itemId} className="p-6">
-                      <div className="flex items-center space-x-4">
-                        {item.image && (
-                          <img
-                            src={item.image}
-                            alt={item.name}
-                            className="w-20 h-20 rounded-lg object-cover"
-                          />
-                        )}
-                        <div className="flex-grow">
-                          <div className="flex items-center space-x-2">
+                {storeData.items.map((item) => (
+                  <div key={item.itemId} className="p-6">
+                    <div className="flex items-center space-x-4">
+                      {item.image && (
+                        <img
+                          src={item.image}
+                          alt={item.name}
+                          className="w-20 h-20 rounded-lg object-cover"
+                        />
+                      )}
+                      <div className="flex-grow">
+                        <div className="flex items-center justify-between">
+                          <div>
                             <h3 className="font-medium text-gray-900">{item.name}</h3>
-                            {isOld && showSmartFeatures && (
-                              <div className="flex items-center space-x-1 px-2 py-1 bg-orange-100 rounded-full">
-                                <Clock className="h-3 w-3 text-orange-600" />
-                                <span className="text-xs text-orange-600">{formatTimeAgo(minutesAgo!)}</span>
-                              </div>
-                            )}
+                            <p className="text-sm text-gray-500">₹{item.price} per {item.unit}</p>
                           </div>
-                          <p className="text-sm text-gray-500">₹{item.price} per {item.unit}</p>
-                          <div className="mt-2 flex items-center justify-between">
-                            <div className="flex items-center space-x-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleQuantityChange(item.itemId, item.quantity - 1)}
-                                disabled={updating === item.itemId}
-                              >
-                                <Minus className="h-4 w-4" />
-                              </Button>
-                              <span className="w-8 text-center">{item.quantity}</span>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => handleQuantityChange(item.itemId, item.quantity + 1)}
-                                disabled={updating === item.itemId}
-                              >
-                                <Plus className="h-4 w-4" />
-                              </Button>
-                            </div>
-                            <div className="flex items-center space-x-4">
-                              <span className="font-medium">₹{item.price * item.quantity}</span>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleQuantityChange(item.itemId, 0)}
-                                disabled={updating === item.itemId}
-                              >
-                                <Trash2 className="h-5 w-5 text-gray-400 hover:text-red-500" />
-                              </Button>
-                            </div>
+                          
+                          {/* AI Notification Control for Individual Items */}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => toggleItemNotifications(item.itemId, !item.notificationsPaused)}
+                            className={`flex items-center space-x-1 ${
+                              item.notificationsPaused ? 'text-gray-400' : 'text-blue-600'
+                            }`}
+                          >
+                            <Bell className="h-3 w-3" />
+                            <span className="text-xs">
+                              {item.notificationsPaused ? 'Paused' : 'Active'}
+                            </span>
+                          </Button>
+                        </div>
+                        
+                        <div className="mt-2 flex items-center justify-between">
+                          <div className="flex items-center space-x-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleQuantityChange(item.itemId, item.quantity - 1)}
+                              disabled={updating === item.itemId}
+                            >
+                              <Minus className="h-4 w-4" />
+                            </Button>
+                            <span className="w-8 text-center">{item.quantity}</span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleQuantityChange(item.itemId, item.quantity + 1)}
+                              disabled={updating === item.itemId}
+                            >
+                              <Plus className="h-4 w-4" />
+                            </Button>
+                          </div>
+                          <div className="flex items-center space-x-4">
+                            <span className="font-medium">₹{item.price * item.quantity}</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleRemoveItem(item.itemId)}
+                              disabled={updating === item.itemId}
+                            >
+                              <Trash2 className="h-5 w-5 text-gray-400 hover:text-red-500" />
+                            </Button>
                           </div>
                         </div>
                       </div>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
               
               {/* Store Subtotal */}

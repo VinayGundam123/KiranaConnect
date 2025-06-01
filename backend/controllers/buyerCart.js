@@ -4,19 +4,174 @@ const model = require('../models/buyer');
 const Buyer = model.Buyer;
 
 
-// Configuration for cart abandonment
-const CART_ABANDONMENT_TIME = 300 * 60 * 1000; // 30 minutes in milliseconds
-const CHECK_INTERVAL = 5 * 60 * 1000; // Check every 5 minutes
+// Configuration for cart abandonment and AI notifications
+const CART_ABANDONMENT_TIME = 2 * 60 * 1000; // 30 minutes in milliseconds
+const AI_NOTIFICATION_INTERVAL = 2 * 60 * 1000; // 15 minutes for AI notifications
+const CHECK_INTERVAL = 1 * 60 * 1000; // Check every 5 minutes
+const MAX_NOTIFICATIONS_PER_ITEM = 3; // Maximum notifications per item
+
+// Store for tracking notification intervals per user
+const userNotificationTimers = new Map();
+
+// Clear notification timer for specific item
+const clearItemNotificationTimer = (buyerId, itemId) => {
+    const timerKey = `${buyerId}-${itemId}`;
+    if (userNotificationTimers.has(timerKey)) {
+        clearTimeout(userNotificationTimers.get(timerKey));
+        userNotificationTimers.delete(timerKey);
+        console.log(`Cleared AI notification timer for buyer ${buyerId}, item ${itemId}`);
+    }
+};
+
+// Schedule next notification with increasing intervals
+const scheduleNextNotification = (buyerId, itemId) => {
+    const timerKey = `${buyerId}-${itemId}`;
+    // Get current notification count
+    Buyer.findById(buyerId).then(buyer => {
+        if (!buyer) return;
+        const item = buyer.cart.items.find(item => item.itemId.toString() === itemId);
+        if (!item || item.notificationCount >= MAX_NOTIFICATIONS_PER_ITEM) {
+            return; // Stop notifications
+        }
+        // Increase interval for subsequent notifications (15min, 30min, 60min)
+        const intervals = [AI_NOTIFICATION_INTERVAL, AI_NOTIFICATION_INTERVAL * 2, AI_NOTIFICATION_INTERVAL * 4];
+        const nextInterval = intervals[item.notificationCount] || AI_NOTIFICATION_INTERVAL * 4;
+        const timer = setTimeout(async () => {
+            await sendAINotificationForItem(buyerId, itemId);
+            scheduleNextNotification(buyerId, itemId);
+        }, nextInterval);
+        userNotificationTimers.set(timerKey, timer);
+    });
+};
+
+// Enhanced function to start AI notification timer for specific item
+const startItemNotificationTimer = (buyerId, itemId) => {
+    const timerKey = `${buyerId}-${itemId}`;
+    
+    // Clear existing timer if any
+    if (userNotificationTimers.has(timerKey)) {
+        clearTimeout(userNotificationTimers.get(timerKey));
+    }
+    
+    // Set new timer
+    const timer = setTimeout(async () => {
+        await sendAINotificationForItem(buyerId, itemId);
+        
+        // Schedule next notification
+        scheduleNextNotification(buyerId, itemId);
+    }, AI_NOTIFICATION_INTERVAL);
+    
+    userNotificationTimers.set(timerKey, timer);
+    console.log(`Started AI notification timer for buyer ${buyerId}, item ${itemId}`);
+};
+
+// Send AI notification for specific item
+const sendAINotificationForItem = async (buyerId, itemId) => {
+    try {
+        const buyer = await Buyer.findById(buyerId);
+        if (!buyer) return;
+        const item = buyer.cart.items.find(item => item.itemId.toString() === itemId);
+        if (!item || item.notificationCount >= MAX_NOTIFICATIONS_PER_ITEM) {
+            clearItemNotificationTimer(buyerId, itemId);
+            return;
+        }
+        // Check if item has been in cart for minimum time
+        const itemAge = Date.now() - new Date(item.addedAt || item.lastUpdated).getTime();
+        if (itemAge < AI_NOTIFICATION_INTERVAL) {
+            return; // Too early to send notification
+        }
+        console.log(`\n🤖 Generating AI notification for item: ${item.name} (Buyer: ${buyer.name})`);
+        // Generate AI notification
+        const notification = await generateSmartItemNotification(buyer, item);
+        if (notification) {
+            // Update item notification status
+            item.notificationCount = (item.notificationCount || 0) + 1;
+            item.lastNotificationSent = new Date();
+            // Store notification in buyer's record
+            if (!buyer.notifications) {
+                buyer.notifications = [];
+            }
+            buyer.notifications.push({
+                type: 'ai_cart_reminder',
+                message: notification,
+                itemId: item.itemId,
+                itemName: item.name,
+                notificationCount: item.notificationCount,
+                sentAt: new Date(),
+                status: 'sent'
+            });
+            await buyer.save();
+            console.log(`✅ AI notification sent for ${item.name} (Count: ${item.notificationCount})`);
+        }
+        
+    } catch (error) {
+        console.error('Error sending AI notification for item:', error);
+    }
+};
+
+// Generate smart notification for specific item
+const generateSmartItemNotification = async (buyer, item) => {
+    try {
+        const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        
+        const timeInCart = Math.floor((Date.now() - new Date(item.addedAt || item.lastUpdated).getTime()) / (1000 * 60));
+        const notificationNumber = (item.notificationCount || 0) + 1;
+        
+        // Adjust urgency based on notification count
+        let urgencyLevel = 'gentle';
+        if (notificationNumber === 2) urgencyLevel = 'moderate';
+        if (notificationNumber >= 3) urgencyLevel = 'final';
+        
+        const completion = await groq.chat.completions.create({
+            messages: [
+                { 
+                    role: 'system', 
+                    content: `You are an AI assistant for Kirana Connect that sends personalized cart reminders for individual items.
+
+                    GUIDELINES:
+                    - This is notification #${notificationNumber} of maximum 3 for this item
+                    - Keep messages short, personal, and action-oriented
+                    - Urgency level: ${urgencyLevel}
+                    - For gentle: friendly reminder with benefits
+                    - For moderate: add mild urgency and potential scarcity
+                    - For final: create strong urgency with limited-time offers
+                    - Use Indian context and local kirana store benefits
+                    - Include clear call-to-action
+                    - Mention item has been waiting for ${timeInCart} minutes
+                    - Keep under 100 words for mobile notifications`
+                },
+                { 
+                    role: 'user', 
+                    content: `Customer: ${buyer.name}
+                    Item: ${item.name} (₹${item.price} x ${item.quantity} ${item.unit})
+                    Store: ${item.storeName}
+                    Time in cart: ${timeInCart} minutes
+                    Notification count: ${notificationNumber}
+                    
+                    Generate a personalized cart reminder for this specific item.`
+                }
+            ],
+            model: "llama-3.3-70b-versatile",
+            temperature: 0.7,
+            max_tokens: 150
+        });
+
+        return completion.choices[0].message.content;
+        
+    } catch (error) {
+        console.error('Error generating smart item notification:', error);
+        return null;
+    }
+};
+
 
 exports.getAllCartProducts = async (req, res) => {
     try {
         const id = req.params.id;
         const buyer = await Buyer.findById(id);
-        
         if (!buyer) {
             return res.status(404).json({ message: 'Buyer not found' });
         }
-        
         res.status(200).json(buyer.cart.items);
         console.log('Buyer cart products:', buyer.cart.items);
     } catch (error) {
@@ -25,44 +180,43 @@ exports.getAllCartProducts = async (req, res) => {
     }
 };
 
+
 exports.createCartProduct = async (req, res) => {
     try {
-        console.log('Request body:', req.body);
-        console.log('Request params:', req.params);
-
-        const { id } = req.params;
+        const id = req.params.id;
         const buyer = await Buyer.findById(id);
-        
         if (!buyer) {
             return res.status(404).json({ message: 'Buyer not found' });
         }
 
         const { itemId, name, price, quantity, image, unit, storeName, storeId } = req.body;
-        
-        // Validate required fields
         if (!itemId || !name || !price || !quantity || !storeName || !storeId) {
             return res.status(400).json({ message: 'Missing required fields' });
         }
 
         const existingItemIndex = buyer.cart.items.findIndex(item => item.itemId.toString() === itemId);
-
         if (existingItemIndex > -1) {
             // If item exists, update its quantity
             const oldQuantity = buyer.cart.items[existingItemIndex].quantity;
             buyer.cart.items[existingItemIndex].quantity += quantity;
+            buyer.cart.items[existingItemIndex].lastUpdated = new Date();
             
             // If quantity becomes 0 or negative, remove the item
             if (buyer.cart.items[existingItemIndex].quantity <= 0) {
                 // Update totals before removing
                 buyer.cart.totalQuantity -= oldQuantity;
                 buyer.cart.totalPrice -= price * oldQuantity;
-                
-                // Remove the item
+                // Remove the item and clear its notifications
                 buyer.cart.items.splice(existingItemIndex, 1);
-            } else {
+                clearItemNotificationTimer(id, itemId);
+            }else {
                 // Update totals
+                console.log(buyer.cart);
                 buyer.cart.totalQuantity += quantity;
                 buyer.cart.totalPrice += price * quantity;
+                // Reset notification count for updated item
+                buyer.cart.items[existingItemIndex].notificationCount = 0;
+                buyer.cart.items[existingItemIndex].lastNotificationSent = null;
             }
         } else {
             // Only add new item if quantity is positive
@@ -75,26 +229,26 @@ exports.createCartProduct = async (req, res) => {
                     image,
                     unit,
                     storeName,
-                    storeId
+                    storeId,
+                    addedAt: new Date(),
+                    lastUpdated: new Date(),
+                    notificationSent: false,
+                    notificationCount: 0,
+                    lastNotificationSent: null
                 };
                 buyer.cart.items.push(newItem);
                 buyer.cart.totalQuantity += quantity;
                 buyer.cart.totalPrice += price * quantity;
+                // Start AI notification timer for new item
+                startItemNotificationTimer(id, itemId);
             }
         }
-
+        // Update cart last activity
+        buyer.cart.lastActivity = new Date();
         await buyer.save();
-        res.status(200).json({ 
-            message: 'Cart updated successfully', 
-            cart: buyer.cart,
-            totalItems: buyer.cart.items.length 
-        });
-        
+        res.status(200).json({message: 'Cart updated successfully', cart: buyer.cart,totalItems: buyer.cart.items.length });
     } catch (error) {
-        res.status(500).json({ 
-            error: 'Internal server error', 
-            details: error.message 
-        });
+        res.status(500).json({ error: 'Internal server error', details: error.message });
         console.error('Error updating cart:', error);
     }
 };
@@ -104,45 +258,34 @@ exports.removeCartProduct = async (req, res) => {
     try {
         const { id } = req.params;
         const { itemId } = req.body;
-        
         const buyer = await Buyer.findById(id);
-        
         if (!buyer) {
             return res.status(404).json({ message: 'Buyer not found' });
         }
 
         const itemIndex = buyer.cart.items.findIndex(item => item.itemId.toString() === itemId);
-        
         if (itemIndex > -1) {
             const item = buyer.cart.items[itemIndex];
-            
             // Update totals
             buyer.cart.totalQuantity -= item.quantity;
             buyer.cart.totalPrice -= item.price * item.quantity;
-            
             // Remove the item
             buyer.cart.items.splice(itemIndex, 1);
             
+            // Clear notification timer
+            clearItemNotificationTimer(id, itemId);
             await buyer.save();
-            
-            res.status(200).json({ 
-                message: 'Item removed from cart successfully', 
-                cart: buyer.cart 
-            });
+            res.status(200).json({message: 'Item removed from cart successfully', cart: buyer.cart });
         } else {
             res.status(404).json({ message: 'Item not found in cart' });
         }
-        
     } catch (error) {
-        res.status(500).json({ 
-            error: 'Internal server error', 
-            details: error.message 
-        });
+        res.status(500).json({error: 'Internal server error',details: error.message });
         console.error('Error removing cart item:', error);
     }
 };
 
-// New function to update item quantity to a specific value
+// Enhanced update quantity function
 exports.updateCartProductQuantity = async (req, res) => {
     try {
         const { id } = req.params;
@@ -166,28 +309,28 @@ exports.updateCartProductQuantity = async (req, res) => {
                 buyer.cart.totalQuantity -= oldQuantity;
                 buyer.cart.totalPrice -= item.price * oldQuantity;
                 buyer.cart.items.splice(itemIndex, 1);
+                // Clear notification timer
+                clearItemNotificationTimer(id, itemId);
             } else {
-                // Update quantity
+                // Update quantity and reset notification status
                 item.quantity = newQuantity;
+                item.lastUpdated = new Date();
+                item.notificationCount = 0;
+                item.lastNotificationSent = null;
                 buyer.cart.totalQuantity += quantityDiff;
                 buyer.cart.totalPrice += item.price * quantityDiff;
+                // Restart notification timer
+                clearItemNotificationTimer(id, itemId);
+                startItemNotificationTimer(id, itemId);
             }
-            
+            buyer.cart.lastActivity = new Date();
             await buyer.save();
-            
-            res.status(200).json({ 
-                message: 'Cart updated successfully', 
-                cart: buyer.cart 
-            });
+            res.status(200).json({ message: 'Cart updated successfully', cart: buyer.cart });
         } else {
             res.status(404).json({ message: 'Item not found in cart' });
         }
-        
     } catch (error) {
-        res.status(500).json({ 
-            error: 'Internal server error', 
-            details: error.message 
-        });
+        res.status(500).json({ error: 'Internal server error', details: error.message });
         console.error('Error updating cart quantity:', error);
     }
 };
@@ -196,40 +339,31 @@ exports.updateCartProductQuantity = async (req, res) => {
 exports.clearCart = async (req, res) => {
     try {
         const { id } = req.params;
-        
         const buyer = await Buyer.findById(id);
-        
         if (!buyer) {
             return res.status(404).json({ message: 'Buyer not found' });
         }
 
+        // Clear all notification timers for this buyer
+        buyer.cart.items.forEach(item => {
+            clearItemNotificationTimer(id, item.itemId);
+        });
         buyer.cart.items = [];
         buyer.cart.totalQuantity = 0;
         buyer.cart.totalPrice = 0;
-        
         await buyer.save();
-        
-        res.status(200).json({ 
-            message: 'Cart cleared successfully', 
-            cart: buyer.cart 
-        });
+        res.status(200).json({ message: 'Cart cleared successfully', cart: buyer.cart });
         
     } catch (error) {
-        res.status(500).json({ 
-            error: 'Internal server error', 
-            details: error.message 
-        });
+        res.status(500).json({ error: 'Internal server error', details: error.message });
         console.error('Error clearing cart:', error);
     }
 };
 
-// New function to check for abandoned carts and send notifications
 exports.checkAbandonedCarts = async () => {
     try {
         const currentTime = new Date();
         const cutoffTime = new Date(currentTime - CART_ABANDONMENT_TIME);
-        
-        // Find buyers with abandoned carts
         const buyersWithAbandonedCarts = await Buyer.find({
             'cart.items': { $exists: true, $ne: [] },
             $or: [
@@ -237,36 +371,113 @@ exports.checkAbandonedCarts = async () => {
                 { 'cart.lastActivity': { $exists: false } }
             ]
         });
-
         console.log(`Found ${buyersWithAbandonedCarts.length} buyers with potentially abandoned carts`);
-        
         for (const buyer of buyersWithAbandonedCarts) {
-            // Check if any items haven't received notification yet
             const itemsNeedingNotification = buyer.cart.items.filter(item => {
                 const itemCutoffTime = new Date(currentTime - CART_ABANDONMENT_TIME);
                 const itemLastActivity = item.lastUpdated || item.addedAt;
                 return !item.notificationSent && itemLastActivity < itemCutoffTime;
             });
-
             if (itemsNeedingNotification.length > 0) {
-                // Generate AI notification for this buyer
                 await generateSmartCartNotification(buyer, itemsNeedingNotification);
-                
-                // Mark items as notified
                 buyer.cart.items.forEach(item => {
                     const itemLastActivity = item.lastUpdated || item.addedAt;
                     if (!item.notificationSent && itemLastActivity < new Date(currentTime - CART_ABANDONMENT_TIME)) {
                         item.notificationSent = true;
                     }
                 });
-                
                 await buyer.save();
             }
         }
-        
     } catch (error) {
         console.error('Error checking abandoned carts:', error);
     }
+};
+
+// API endpoint to get AI notifications for a user
+exports.getAINotifications = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { limit = 1000 } = req.query;
+        const buyer = await Buyer.findById(id);
+        if (!buyer) {
+            return res.status(404).json({ message: 'Buyer not found' });
+        }
+        const aiNotifications = (buyer.notifications || [])
+            .sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt))
+            // .filter(notification => notification.type === 'ai_cart_reminder');
+        
+        res.status(200).json({
+            notifications: aiNotifications,
+            total: aiNotifications.length
+        });
+        console.log(buyer.notifications);
+    } catch (error) {
+        console.error('Error getting AI notifications:', error);
+        res.status(500).json({ error: 'Internal server error', details: error.message });
+    }
+};
+
+// API endpoint to pause/resume notifications for specific item
+exports.toggleItemNotifications = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { itemId, pause } = req.body;
+        const buyer = await Buyer.findById(id);
+        if (!buyer) {
+            return res.status(404).json({ message: 'Buyer not found' });
+        }
+        const item = buyer.cart.items.find(item => item.itemId.toString() === itemId);
+        if (!item) {
+            return res.status(404).json({ message: 'Item not found in cart' });
+        }
+        if (pause) {
+            clearItemNotificationTimer(id, itemId);
+            item.notificationsPaused = true;
+        } else {
+            item.notificationsPaused = false;
+            if (item.notificationCount < MAX_NOTIFICATIONS_PER_ITEM) {
+                startItemNotificationTimer(id, itemId);
+            }
+        }
+        await buyer.save();
+        res.status(200).json({
+            message: `Notifications ${pause ? 'paused' : 'resumed'} for ${item.name}`,
+            item: {
+                itemId: item.itemId,
+                name: item.name,
+                notificationsPaused: item.notificationsPaused
+            }
+        });
+    } catch (error) {
+        console.error('Error toggling item notifications:', error);
+        res.status(500).json({error: 'Internal server error', details: error.message });
+    }
+};
+
+// Initialize enhanced cart system
+exports.initializeAbandonedCartChecker = () => {
+    console.log('Initializing enhanced cart system with AI notifications...');
+    // Run abandoned cart check immediately
+    exports.checkAbandonedCarts();
+    // Set up interval for abandoned cart checks
+    setInterval(() => {
+        exports.checkAbandonedCarts();
+    }, CHECK_INTERVAL);
+    console.log(`Enhanced cart system initialized:`);
+    console.log(`- Abandoned cart checks: every ${CHECK_INTERVAL / 1000 / 60} minutes`);
+    console.log(`- AI notifications: every ${AI_NOTIFICATION_INTERVAL / 1000 / 60} minutes per item`);
+    console.log(`- Max notifications per item: ${MAX_NOTIFICATIONS_PER_ITEM}`);
+};
+
+// Cleanup function for server shutdown
+exports.cleanup = () => {
+    console.log('Cleaning up notification timers...');
+    userNotificationTimers.forEach((timer, key) => {
+        clearTimeout(timer);
+        console.log(`Cleared timer: ${key}`);
+    });
+    userNotificationTimers.clear();
 };
 
 // Function to generate smart cart notification using AI
@@ -473,21 +684,6 @@ exports.getSmartCartInsights = async (req, res) => {
             details: error.message 
         });
     }
-};
-
-// Initialize abandoned cart checker (call this when your server starts)
-exports.initializeAbandonedCartChecker = () => {
-    console.log('Initializing abandoned cart checker...');
-    
-    // Run immediately on startup
-    exports.checkAbandonedCarts();
-    
-    // Then run every CHECK_INTERVAL
-    setInterval(() => {
-        exports.checkAbandonedCarts();
-    }, CHECK_INTERVAL);
-    
-    console.log(`Abandoned cart checker will run every ${CHECK_INTERVAL / 1000 / 60} minutes`);
 };
 
 exports.sendPrompt = async (req, res) => {
