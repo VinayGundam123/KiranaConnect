@@ -13,7 +13,7 @@ exports.signUp=async (req, res) => {
         newBuyer.password =  hash;
         await newBuyer.save();
         const { password: _, ...responseBuyer } = newBuyer.toObject();
-        res.status(201).json(responseBuyer);
+        res.status(201).json(newBuyer._id);
         console.log('Buyer signed up successfully:', responseBuyer);
     } catch (error) {
         console.error('Error during sign-up:', error);
@@ -36,7 +36,7 @@ exports.login=async (req, res) => {
         buyer.token = token;
         await buyer.save();
         const { password: _, ...responseBuyer } = buyer.toObject();
-        res.status(201).json(responseBuyer);
+        res.status(201).json(buyer._id);
         console.log('Buyer logged in successfully:', responseBuyer);
     } catch (error) {
         console.error('Error during login:', error);

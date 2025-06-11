@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import toast from 'react-hot-toast';
 import axios from 'axios';
+import { use } from 'framer-motion/client';
 
 interface CartItem {
   itemId: string;
@@ -21,6 +22,7 @@ interface CartItem {
   notificationCount?: number;
   lastNotificationSent?: string;
   notificationsPaused?: boolean;
+  selected?: boolean;
 }
 
 interface AINotification {
@@ -47,6 +49,7 @@ export function Checkout() {
   const [error, setError] = useState<string | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
   const [clearingCart, setClearingCart] = useState(false);
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   
   // AI Notifications only
   const [aiNotifications, setAiNotifications] = useState<AINotification[]>([]);
@@ -58,7 +61,10 @@ export function Checkout() {
   const lastNotificationCheck = useRef<Date>(new Date());
 
   // Replace with actual buyer ID from your auth system
-  const buyerId = '683092882648c78a89f6b377';
+  const buyerId=localStorage.getItem('buyerId') ;
+  if (!buyerId) {
+    return <div className="text-center text-red-600">Buyer ID not found. Please log in.</div>;
+  }
 
   useEffect(() => {
     fetchCartData();
@@ -66,6 +72,7 @@ export function Checkout() {
     
     // Check for new AI notifications every 30 seconds
     const aiCheckInterval = setInterval(() => {
+      console.log('Checking for new notifications...'); // Debug log
       checkForNewAINotifications();
     }, 30000); // 30 seconds interval
 
@@ -74,6 +81,7 @@ export function Checkout() {
     };
   }, []);
 
+  //Fetching the cart data from the server
   const fetchCartData = async () => {
     try {
       setLoading(true);
@@ -81,6 +89,8 @@ export function Checkout() {
       const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}`);
       if (Array.isArray(response.data)) {
         setCartData(response.data);
+        // Set all items as selected by default
+        setSelectedItems(new Set(response.data.map(item => item.itemId)));
       } else {
         console.error('Unexpected response format:', response.data);
         setError('Invalid response format from server');
@@ -94,30 +104,40 @@ export function Checkout() {
     }
   };
 
+  
   const fetchAINotifications = async () => {
     try {
       const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}/ai-notifications?limit=20`);
-      setAiNotifications(response.data.notifications || []);
+      console.log('Fetched AI notifications:', response.data); // Debug log
+      if (response.data && response.data.notifications) {
+        setAiNotifications(response.data.notifications);
+      } else {
+        console.warn('No notifications in response:', response.data);
+      }
     } catch (err) {
       console.error('Error fetching AI notifications:', err);
+      toast.error('Failed to load notifications');
     }
   };
 
   const checkForNewAINotifications = async () => {
     try {
       const response = await axios.get(`http://localhost:5000/buyer/cart/${buyerId}/ai-notifications?limit=20`);
+      console.log('Checking for new notifications:', response.data); // Debug log
+      
       const newNotifications = response.data.notifications || [];
       
       // Check for notifications newer than last check
-      const newOnes = newNotifications.filter(notification => 
+      const newOnes = newNotifications.filter((notification: AINotification) => 
         new Date(notification.sentAt) > lastNotificationCheck.current
       );
       
       if (newOnes.length > 0) {
+        console.log('Found new notifications:', newOnes); // Debug log
         setNewAINotificationCount(prev => prev + newOnes.length);
         
         // Show toast for new AI notification
-        newOnes.forEach(notif => {
+        newOnes.forEach((notif: AINotification) => {
           toast.success(`🤖 New AI reminder: ${notif.message}...`, {
             duration: 5000,
             position: 'top-right'
@@ -130,19 +150,24 @@ export function Checkout() {
       lastNotificationCheck.current = new Date();
     } catch (err) {
       console.error('Error checking new AI notifications:', err);
+      toast.error('Failed to check for new notifications');
     }
   };
 
   const triggerManualAINotification = async () => {
     try {
       setGeneratingNotification(true);
+      console.log('Triggering manual AI notification...'); // Debug log
       
       const response = await axios.post(`http://localhost:5000/buyer/cart/${buyerId}/smart-notification`);
+      console.log('Manual notification response:', response.data); // Debug log
       
       if (response.data.notification) {
         toast.success('🤖 AI notification generated successfully!');
         // Refresh AI notifications
         await fetchAINotifications();
+      } else {
+        toast.error('No notification was generated');
       }
       
     } catch (error) {
@@ -254,7 +279,27 @@ export function Checkout() {
     }
   };
 
-  // Group items by store
+  const toggleItemSelection = (itemId: string) => {
+    setSelectedItems(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(itemId)) {
+        newSet.delete(itemId);
+      } else {
+        newSet.add(itemId);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedItems.size === cartData.length) {
+      setSelectedItems(new Set());
+    } else {
+      setSelectedItems(new Set(cartData.map(item => item.itemId)));
+    }
+  };
+
+  // Update the itemsByStore calculation to include all items but track selection
   const itemsByStore = cartData.reduce<Record<string, StoreGroup>>((acc, item) => {
     if (!acc[item.storeId]) {
       acc[item.storeId] = {
@@ -264,14 +309,20 @@ export function Checkout() {
       };
     }
     acc[item.storeId].items.push(item);
-    acc[item.storeId].subtotal += item.price * item.quantity;
+    // Only add to subtotal if selected
+    if (selectedItems.has(item.itemId)) {
+      acc[item.storeId].subtotal += item.price * item.quantity;
+    }
     return acc;
   }, {});
+
+  // Update the subtotal calculation to only include selected items
+  const subtotal = cartData.reduce((sum, item) => 
+    selectedItems.has(item.itemId) ? sum + (item.price * item.quantity) : sum, 0);
 
   const deliveryFee = 40;
   const storeCount = Object.keys(itemsByStore).length;
   const totalDeliveryFee = storeCount * deliveryFee;
-  const subtotal = cartData.reduce((sum, item) => sum + (item.price * item.quantity), 0);
   const finalTotal = subtotal + totalDeliveryFee;
 
   if (loading) {
@@ -330,6 +381,13 @@ export function Checkout() {
         
         {cartData.length > 0 && (
           <div className="flex space-x-2">
+            <Button
+              variant="outline"
+              onClick={toggleSelectAll}
+              className="flex items-center space-x-2"
+            >
+              {selectedItems.size === cartData.length ? 'Deselect All' : 'Select All'}
+            </Button>
             <Button
               variant="outline"
               onClick={() => setShowAINotifications(!showAINotifications)}
@@ -410,8 +468,14 @@ export function Checkout() {
               {/* Store Items */}
               <div className="divide-y divide-gray-100">
                 {storeData.items.map((item) => (
-                  <div key={item.itemId} className="p-6">
+                  <div key={item.itemId} className={`p-6 ${!selectedItems.has(item.itemId) ? 'opacity-60' : ''}`}>
                     <div className="flex items-center space-x-4">
+                      <input
+                        type="checkbox"
+                        checked={selectedItems.has(item.itemId)}
+                        onChange={() => toggleItemSelection(item.itemId)}
+                        className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
                       {item.image && (
                         <img
                           src={item.image}
@@ -499,36 +563,42 @@ export function Checkout() {
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 h-fit">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Order Summary</h2>
           <div className="space-y-4">
-            {Object.entries(itemsByStore).map(([storeId, storeData]) => (
-              <div key={storeId} className="flex justify-between text-sm">
-                <span className="text-gray-600">{storeData.storeName}</span>
-                <span className="font-medium">₹{storeData.subtotal}</span>
-              </div>
-            ))}
-            <div className="flex justify-between text-sm">
-              <span className="text-gray-600">Delivery Fee ({storeCount} stores)</span>
-              <span className="font-medium">₹{totalDeliveryFee}</span>
-            </div>
-            
-            {/* Discount for orders > 1000 */}
-            {subtotal > 1000 && (
-              <div className="flex justify-between text-sm text-green-600">
-                <span>Discount (15%)</span>
-                <span>-₹{Math.round(subtotal * 0.15)}</span>
-              </div>
+            {selectedItems.size === 0 ? (
+              <p className="text-sm text-gray-500 text-center">Select items to checkout</p>
+            ) : (
+              <>
+                {Object.entries(itemsByStore).map(([storeId, storeData]) => (
+                  <div key={storeId} className="flex justify-between text-sm">
+                    <span className="text-gray-600">{storeData.storeName}</span>
+                    <span className="font-medium">₹{storeData.subtotal}</span>
+                  </div>
+                ))}
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600">Delivery Fee ({Object.keys(itemsByStore).length} stores)</span>
+                  <span className="font-medium">₹{Object.keys(itemsByStore).length * deliveryFee}</span>
+                </div>
+                
+                {/* Discount for orders > 1000 */}
+                {subtotal > 1000 && (
+                  <div className="flex justify-between text-sm text-green-600">
+                    <span>Discount (15%)</span>
+                    <span>-₹{Math.round(subtotal * 0.15)}</span>
+                  </div>
+                )}
+                
+                <div className="border-t border-gray-100 pt-4">
+                  <div className="flex justify-between">
+                    <span className="font-medium">Total</span>
+                    <span className="font-bold">
+                      ₹{subtotal > 1000 ? finalTotal - Math.round(subtotal * 0.15) : finalTotal}
+                    </span>
+                  </div>
+                </div>
+                <Button className="w-full">
+                  Proceed to Checkout ({selectedItems.size} items)
+                </Button>
+              </>
             )}
-            
-            <div className="border-t border-gray-100 pt-4">
-              <div className="flex justify-between">
-                <span className="font-medium">Total</span>
-                <span className="font-bold">
-                  ₹{subtotal > 1000 ? finalTotal - Math.round(subtotal * 0.15) : finalTotal}
-                </span>
-              </div>
-            </div>
-            <Button className="w-full">
-              Proceed to Checkout
-            </Button>
           </div>
         </div>
       </div>

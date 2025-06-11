@@ -2,12 +2,14 @@ require('dotenv').config();
 const { Groq } = require("groq-sdk");
 const model = require('../models/buyer');
 const Buyer = model.Buyer;
+const sgMail = require('@sendgrid/mail');
 
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // Configuration for cart abandonment and AI notifications
-const CART_ABANDONMENT_TIME = 2 * 60 * 1000; // 30 minutes in milliseconds
-const AI_NOTIFICATION_INTERVAL = 2 * 60 * 1000; // 15 minutes for AI notifications
-const CHECK_INTERVAL = 1 * 60 * 1000; // Check every 5 minutes
+const CART_ABANDONMENT_TIME = 2 * 60 * 1000; //  3 days in milliseconds
+const AI_NOTIFICATION_INTERVAL =  2 * 60 * 1000; // 3 * 24 * 60 3 days for AI notifications
+const CHECK_INTERVAL =  60 * 1000; // Check every day
 const MAX_NOTIFICATIONS_PER_ITEM = 3; // Maximum notifications per item
 
 // Store for tracking notification intervals per user
@@ -93,7 +95,7 @@ const sendAINotificationForItem = async (buyerId, itemId) => {
             }
             buyer.notifications.push({
                 type: 'ai_cart_reminder',
-                message: notification,
+                message: notification.text,
                 itemId: item.itemId,
                 itemName: item.name,
                 notificationCount: item.notificationCount,
@@ -101,6 +103,24 @@ const sendAINotificationForItem = async (buyerId, itemId) => {
                 status: 'sent'
             });
             await buyer.save();
+            //send the mail
+            try {
+                const to = buyer.email;
+                const subject = "Regarding Your Cart at KiranaConnect";
+                const message = notification.text;
+                const messageHtml = notification.html;
+                await sgMail.send({
+                    to: to,
+                    from: 'vinaygundam123@gmail.com',
+                    subject: subject,
+                    text: message,
+                    html: `<p>${messageHtml}</p>`
+                });
+                console.log(`Email sent to ${to} with subject "${subject}"`);
+            } catch (error) {
+                console.error('Email error:', error);
+                return;
+            }
             console.log(`✅ AI notification sent for ${item.name} (Count: ${item.notificationCount})`);
         }
         
@@ -138,7 +158,8 @@ const generateSmartItemNotification = async (buyer, item) => {
                     - Use Indian context and local kirana store benefits
                     - Include clear call-to-action
                     - Mention item has been waiting for ${timeInCart} minutes
-                    - Keep under 100 words for mobile notifications`
+                    - Keep under 150 words for mobile notifications
+                    - Do NOT include any links or sign-offs like 'Regards' or the website link. Only generate the main message body.`
                 },
                 { 
                     role: 'user', 
@@ -156,7 +177,22 @@ const generateSmartItemNotification = async (buyer, item) => {
             max_tokens: 150
         });
 
-        return completion.choices[0].message.content;
+        const notification = completion.choices[0].message.content.trim();
+        
+        // Remove any leading/trailing quotes from the AI message
+        let cleanMessage = notification.trim();
+        if ((cleanMessage.startsWith('"') && cleanMessage.endsWith('"')) || (cleanMessage.startsWith("'") && cleanMessage.endsWith("'"))) {
+            cleanMessage = cleanMessage.slice(1, -1).trim();
+        }
+        // Add the cart and website links
+        const cartLink = 'http://localhost:5173/buyer/cart';
+        const websiteLink = 'http://localhost:5173/';
+        const cartLine = `View your cart and complete your purchase: ${cartLink}`;
+        const scriptLine = cartLine;
+        const formattedNotification = `${cleanMessage}\n\n${scriptLine}\n\nRegards,\nKiranaConnect Team\nVisit our website: ${websiteLink}`;
+        const formattedNotificationHtml = `${cleanMessage.replace(/\n/g, '<br>')}<br><br><a href="${cartLink}">View your cart and complete your purchase</a><br><br>Regards,<br>KiranaConnect Team<br>Visit our website: <a href="${websiteLink}">${websiteLink}</a>`;
+        
+        return { text: formattedNotification, html: formattedNotificationHtml };
         
     } catch (error) {
         console.error('Error generating smart item notification:', error);
@@ -209,7 +245,7 @@ exports.createCartProduct = async (req, res) => {
                 // Remove the item and clear its notifications
                 buyer.cart.items.splice(existingItemIndex, 1);
                 clearItemNotificationTimer(id, itemId);
-            }else {
+            } else {
                 // Update totals
                 console.log(buyer.cart);
                 buyer.cart.totalQuantity += quantity;
@@ -217,6 +253,9 @@ exports.createCartProduct = async (req, res) => {
                 // Reset notification count for updated item
                 buyer.cart.items[existingItemIndex].notificationCount = 0;
                 buyer.cart.items[existingItemIndex].lastNotificationSent = null;
+                // Start notification timer for updated item
+                clearItemNotificationTimer(id, itemId);
+                startItemNotificationTimer(id, itemId);
             }
         } else {
             // Only add new item if quantity is positive

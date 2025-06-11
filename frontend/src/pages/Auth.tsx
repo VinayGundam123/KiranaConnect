@@ -208,7 +208,7 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
           email: formData.email,
           password: formData.password
         });
-        localStorage.setItem('buyer',JSON.stringify(response.data));
+        localStorage.setItem('buyerId',response.data);
         console.log(response.data);
         // await signIn(formData.email, formData.password);
         toast.success('Login successful!');
@@ -218,6 +218,7 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
           password: formData.password,
           name: formData.name
         });
+        localStorage.setItem('buyerId',response.data);
         console.log(response.data);
         // await signUp(formData.email, formData.password);
         toast.success('Account created successfully!');
