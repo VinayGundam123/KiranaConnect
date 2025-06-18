@@ -16,7 +16,6 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import toast from 'react-hot-toast';
-// import { signIn, signUp } from '@/lib/auth';
 
 const fadeIn = {
   initial: { opacity: 0, y: 20 },
@@ -133,13 +132,13 @@ function RoleSelection() {
 interface AuthFormData {
   email: string;
   password: string;
-  name?: string;
-  phone?: string;
+  name: string;
+  phone: string;
   storeName?: string;
   storeAddress?: string;
   storeType?: string;
-  openingTime?: string;
-  closingTime?: string;
+  openingTime?: Date;
+  closingTime?: Date;
   gstNumber?: string;
 }
 
@@ -155,10 +154,14 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
     storeName: '',
     storeAddress: '',
     storeType: 'grocery',
-    openingTime: '09:00',
-    closingTime: '21:00',
+    openingTime: new Date('2000-01-01T09:00:00'),
+    closingTime: new Date('2000-01-01T21:00:00'),
     gstNumber: '',
   });
+
+  const validateTimeFormat = (time: Date): boolean => {
+    return time instanceof Date && !isNaN(time.getTime());
+  };
 
   const validateForm = () => {
     if (!formData.email || !formData.password) {
@@ -187,6 +190,18 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
           toast.error('Please fill in all store details');
           return false;
         }
+
+        // Validate time formats
+        if (!validateTimeFormat(formData.openingTime) || !validateTimeFormat(formData.closingTime)) {
+          toast.error('Please enter valid time');
+          return false;
+        }
+
+        // Validate that closing time is after opening time
+        if (formData.closingTime <= formData.openingTime) {
+          toast.error('Closing time must be after opening time');
+          return false;
+        }
       }
     }
 
@@ -203,24 +218,47 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
     setLoading(true);
 
     try {
-      if (isLogin) {
+      if (isLogin && role==='buyer') {
         const response = await axios.post('http://localhost:5000/buyer/login',{
           email: formData.email,
           password: formData.password
         });
         localStorage.setItem('buyerId',response.data);
         console.log(response.data);
-        // await signIn(formData.email, formData.password);
         toast.success('Login successful!');
-      } else {
+      } else if(!isLogin && role==='buyer') {
         const response = await axios.post('http://localhost:5000/buyer/signUp',{
+          name: formData.name,
           email: formData.email,
           password: formData.password,
-          name: formData.name
+          phone: formData.phone
         });
         localStorage.setItem('buyerId',response.data);
         console.log(response.data);
-        // await signUp(formData.email, formData.password);
+        toast.success('Account created successfully!');
+      } else if (isLogin && role === 'seller') {
+        const response = await axios.post('http://localhost:5000/seller/login', {
+          email: formData.email,
+          password: formData.password
+        });
+        localStorage.setItem('sellerId', response.data);
+        console.log(response.data);
+        toast.success('Login successful!');
+      } else if (!isLogin && role === 'seller') {
+        const response = await axios.post('http://localhost:5000/seller/signUp', {
+          email: formData.email,
+          password: formData.password,
+          name: formData.name,
+          phone: formData.phone,
+          storeName: formData.storeName,
+          storeAddress: formData.storeAddress,
+          storeType: formData.storeType,
+          openingTime: formData.openingTime?.toISOString(),
+          closingTime: formData.closingTime?.toISOString(),
+          gstNumber: formData.gstNumber
+        })
+        localStorage.setItem('sellerId', response.data);
+        console.log(response.data);
         toast.success('Account created successfully!');
       }
       navigate(role === 'seller' ? '/seller' : '/buyer');
@@ -229,6 +267,18 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Add this function to handle time input changes
+  const handleTimeChange = (field: 'openingTime' | 'closingTime', value: string) => {
+    const [hours, minutes] = value.split(':').map(Number);
+    const date = new Date('2000-01-01');
+    date.setHours(hours, minutes);
+    
+    setFormData(prev => ({
+      ...prev,
+      [field]: date
+    }));
   };
 
   return (
@@ -376,36 +426,24 @@ function AuthForm({ role }: { role: 'buyer' | 'seller' }) {
                         <label className="block text-sm font-medium text-gray-700">
                           Opening Time
                         </label>
-                        <div className="mt-1 relative">
-                          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <Clock className="h-5 w-5 text-gray-400" />
-                          </div>
-                          <input
-                            type="time"
-                            required
-                            value={formData.openingTime}
-                            onChange={(e) => setFormData({ ...formData, openingTime: e.target.value })}
-                            className="block w-full pl-10 sm:text-sm border-gray-300 rounded-lg focus:ring-primary-500 focus:border-primary-500"
-                          />
-                        </div>
+                        <input
+                          type="time"
+                          value={formData.openingTime?.toTimeString().slice(0, 5)}
+                          onChange={(e) => handleTimeChange('openingTime', e.target.value)}
+                          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                        />
                       </div>
 
                       <div>
                         <label className="block text-sm font-medium text-gray-700">
                           Closing Time
                         </label>
-                        <div className="mt-1 relative">
-                          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                            <Clock className="h-5 w-5 text-gray-400" />
-                          </div>
-                          <input
-                            type="time"
-                            required
-                            value={formData.closingTime}
-                            onChange={(e) => setFormData({ ...formData, closingTime: e.target.value })}
-                            className="block w-full pl-10 sm:text-sm border-gray-300 rounded-lg focus:ring-primary-500 focus:border-primary-500"
-                          />
-                        </div>
+                        <input
+                          type="time"
+                          value={formData.closingTime?.toTimeString().slice(0, 5)}
+                          onChange={(e) => handleTimeChange('closingTime', e.target.value)}
+                          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                        />
                       </div>
                     </div>
 

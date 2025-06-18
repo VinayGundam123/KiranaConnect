@@ -323,7 +323,7 @@ export function Checkout() {
   const deliveryFee = 40;
   const storeCount = Object.keys(itemsByStore).length;
   const totalDeliveryFee = storeCount * deliveryFee;
-  const finalTotal = subtotal + totalDeliveryFee;
+  const finalTotal = Math.floor(subtotal + totalDeliveryFee);
 
   if (loading) {
     return (
@@ -590,7 +590,7 @@ export function Checkout() {
                   <div className="flex justify-between">
                     <span className="font-medium">Total</span>
                     <span className="font-bold">
-                      ₹{subtotal > 1000 ? finalTotal - Math.round(subtotal * 0.15) : finalTotal}
+                      ₹{finalTotal}
                     </span>
                   </div>
                 </div>

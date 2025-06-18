@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   TrendingUp,
@@ -19,6 +19,7 @@ import { StatCard } from '@/components/dashboard/StatCard';
 import { Button } from '@/components/ui/button';
 import { motion, AnimatePresence } from 'framer-motion';
 import toast from 'react-hot-toast';
+import axios from 'axios';
 
 const mockOrders = [
   {
@@ -41,14 +42,38 @@ const mockOrders = [
 
 export function SellerDashboard() {
   const navigate = useNavigate();
-  const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isReportsModalOpen, setIsReportsModalOpen] = useState(false);
+  const [lowStockCount, setLowStockCount] = useState(0);
+  const [loading, setLoading] = useState(true);
 
-  const handleAddProduct = (e: React.FormEvent) => {
-    e.preventDefault();
-    toast.success('Product added successfully');
-    setIsAddProductModalOpen(false);
-  };
+  useEffect(() => {
+    const fetchLowStockItems = async () => {
+      try {
+        const sellerId = localStorage.getItem('sellerId');
+        if (!sellerId) {
+          toast.error('Seller ID not found');
+          return;
+        }
+
+        const response = await axios.get(`http://localhost:5000/seller/inventory/${sellerId}`);
+        const products = response.data.products;
+        
+        // Count products where stock is less than or equal to min_stock_level
+        const lowStockItems = products.filter(
+          (product: any) => product.quantity <= product.minStockLevel
+        );
+        
+        setLowStockCount(lowStockItems.length);
+      } catch (error: any) {
+        console.error('Error fetching low stock items:', error);
+        toast.error(error.response?.data?.message || 'Failed to fetch low stock items');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchLowStockItems();
+  }, []);
 
   const handleGenerateReport = (reportType: string) => {
     toast.success(`Generating ${reportType} report...`);
@@ -64,14 +89,6 @@ export function SellerDashboard() {
           <p className="text-gray-500 mt-1">Overview of your store's performance</p>
         </div>
         <div className="flex space-x-4">
-          <Button 
-            variant="outline"
-            onClick={() => setIsAddProductModalOpen(true)}
-            className="bg-white hover:bg-gray-50"
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            Add Product
-          </Button>
           <Button
             onClick={() => setIsReportsModalOpen(true)}
             className="bg-primary-600 hover:bg-primary-700 text-white"
@@ -104,9 +121,11 @@ export function SellerDashboard() {
         />
         <StatCard
           title="Low Stock Items"
-          value="23"
+          value={loading ? "..." : lowStockCount.toString()}
           change={0}
           icon={AlertTriangle}
+          onClick={() => navigate('/seller/inventory')}
+          className="cursor-pointer hover:bg-gray-50"
         />
       </div>
 
@@ -203,112 +222,6 @@ export function SellerDashboard() {
           </div>
         </div>
       </div>
-
-      {/* Add Product Modal */}
-      <AnimatePresence>
-        {isAddProductModalOpen && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-xl p-6 w-full max-w-lg"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold">Add New Product</h3>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setIsAddProductModalOpen(false)}
-                >
-                  <X className="h-5 w-5" />
-                </Button>
-              </div>
-              <form onSubmit={handleAddProduct} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Product Name</label>
-                  <input
-                    type="text"
-                    className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
-                    placeholder="Enter product name"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Category</label>
-                  <select className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500">
-                    <option>Groceries</option>
-                    <option>Vegetables</option>
-                    <option>Fruits</option>
-                    <option>Dairy</option>
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">Price (₹)</label>
-                    <input
-                      type="number"
-                      className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
-                      placeholder="0.00"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700">Stock Quantity</label>
-                    <input
-                      type="number"
-                      className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
-                      placeholder="0"
-                      required
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Description</label>
-                  <textarea
-                    className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
-                    rows={3}
-                    placeholder="Product description..."
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Product Image</label>
-                  <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-lg">
-                    <div className="space-y-1 text-center">
-                      <Image className="mx-auto h-12 w-12 text-gray-400" />
-                      <div className="flex text-sm text-gray-600">
-                        <label className="relative cursor-pointer bg-white rounded-md font-medium text-primary-600 hover:text-primary-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-primary-500">
-                          <span>Upload a file</span>
-                          <input type="file" className="sr-only" accept="image/*" />
-                        </label>
-                        <p className="pl-1">or drag and drop</p>
-                      </div>
-                      <p className="text-xs text-gray-500">PNG, JPG, GIF up to 10MB</p>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex justify-end space-x-3 mt-6">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setIsAddProductModalOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit">
-                    Add Product
-                  </Button>
-                </div>
-              </form>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Reports Modal */}
       <AnimatePresence>

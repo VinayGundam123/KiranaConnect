@@ -7,9 +7,9 @@ const sgMail = require('@sendgrid/mail');
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // Configuration for cart abandonment and AI notifications
-const CART_ABANDONMENT_TIME = 2 * 60 * 1000; //  3 days in milliseconds
-const AI_NOTIFICATION_INTERVAL =  2 * 60 * 1000; // 3 * 24 * 60 3 days for AI notifications
-const CHECK_INTERVAL =  60 * 1000; // Check every day
+const CART_ABANDONMENT_TIME = 3 * 24 * 60 * 60 * 1000; //  3 days in milliseconds
+const AI_NOTIFICATION_INTERVAL =3 * 24 * 60 * 60 * 1000; //  3 days for AI notifications
+const CHECK_INTERVAL = 15 * 60 * 1000; // Check 15 mintutes `
 const MAX_NOTIFICATIONS_PER_ITEM = 3; // Maximum notifications per item
 
 // Store for tracking notification intervals per user
@@ -136,7 +136,7 @@ const generateSmartItemNotification = async (buyer, item) => {
         
         const timeInCart = Math.floor((Date.now() - new Date(item.addedAt || item.lastUpdated).getTime()) / (1000 * 60));
         const notificationNumber = (item.notificationCount || 0) + 1;
-        
+        const couponCodes = ['KIRANA10', 'KIRANA20', 'KIRANA30', 'KIRANA40', 'KIRANA50'];
         // Adjust urgency based on notification count
         let urgencyLevel = 'gentle';
         if (notificationNumber === 2) urgencyLevel = 'moderate';
@@ -159,7 +159,8 @@ const generateSmartItemNotification = async (buyer, item) => {
                     - Include clear call-to-action
                     - Mention item has been waiting for ${timeInCart} minutes
                     - Keep under 150 words for mobile notifications
-                    - Do NOT include any links or sign-offs like 'Regards' or the website link. Only generate the main message body.`
+                    - Do NOT include any links or sign-offs like 'Regards' or the website link. Only generate the main message body.
+                    - Let them know that if the order of the cart is greater than or equals to 1000 then they will get a discount of 10% on the order and randomly generate the a coupon code form this list: ${couponCodes}`
                 },
                 { 
                     role: 'user', 
@@ -727,10 +728,24 @@ exports.getSmartCartInsights = async (req, res) => {
 
 exports.sendPrompt = async (req, res) => {
     try {
-        const { cartItems, userHistory, userDetails } = req.body; // Input from client
-        
+        const { 
+            cartItems, 
+            userHistory, 
+            userDetails,
+            companyConfig = {
+                name: 'Kirana Connect',
+                currency: '₹',
+                discountThreshold: 1000,
+                discountPercentage: 5,
+                storeType: 'local store',
+                supportChannel: 'platform',
+                customRules: []
+            }
+        } = req.body;
+
         // Initialize Groq client
         const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
         // Create a completion
         const completion = await groq.chat.completions.create({
             messages: [
@@ -738,30 +753,38 @@ exports.sendPrompt = async (req, res) => {
                     role: 'system', 
                     content: `1. Clear and Concise Instructions
                         Goal:
-                        You are an AI agent designed to help customers complete their purchases on Kirana Connect by reminding them about items left in their
-                         shopping cart at their local kirana store.
+                        You are an AI agent designed to help customers complete their purchases on ${companyConfig.name} by reminding them about items left in their
+                        shopping cart at their ${companyConfig.storeType}.
+                        
                         Actions:
                         Identify customers who have abandoned their carts and send them personalized, friendly messages to encourage them to complete their purchase.
+                        
                         Personalization:
                         Use customer data—including their name, current cart contents, and previous purchase history—to craft messages that feel relevant and
-                         tailored to each individual.
+                        tailored to each individual.
+                        
                         Urgency:
                         Incorporate a sense of urgency in your messages, such as highlighting limited-time offers, low stock alerts, or special discounts available 
                         only for a short period.
 
                         2. Tailored Messaging and Strategies
                         Offer Incentives:
-                        Suggest exclusive deals, discounts, free delivery, or bundled offers from their local kirana store to motivate customers to finalize their
-                         purchase,if the  order is greater than Rs.1000/- then you will get around 15% discount.
+                        Suggest exclusive deals, discounts, free delivery, or bundled offers from their ${companyConfig.storeType} to motivate customers to finalize their
+                        purchase. If the order is greater than ${companyConfig.currency}${companyConfig.discountThreshold}, mention the ${companyConfig.discountPercentage}% discount available.
+                        
                         Highlight Specific Items:
                         Clearly mention the exact products left in the cart, especially popular or frequently purchased items, to remind customers of their interest.
+                        
                         Multi-Channel Communication:
                         Indicate that messages can be sent via email, SMS, push notifications, or in-app messages to maximize the chances of reaching the customer.
+                        
                         Clear Calls to Action:
                         Always include a direct and easy-to-follow call to action, such as a link or button to return to their cart and complete their order.
 
                         Offer Support:
-                        Invite customers to contact their local kirana store through the platform if they have questions, need help, or want to modify their order.
+                        Invite customers to contact their ${companyConfig.storeType} through the ${companyConfig.supportChannel} if they have questions, need help, or want to modify their order.
+                        
+                        ${companyConfig.customRules.length > 0 ? 'Additional Company Rules:\n' + companyConfig.customRules.join('\n') : ''}
                     ` 
                 },
                 { 
@@ -781,4 +804,175 @@ exports.sendPrompt = async (req, res) => {
         console.error("Error:", error.message);
         res.status(500).json({ error: "Failed to communicate with the model" });
     }
+};
+
+// Update cart analytics
+const updateCartAnalytics = async (buyer) => {
+    if (buyer.isModified('cart.items')) {
+        const cartItems = buyer.cart.items || [];
+        buyer.cartAnalytics.totalItemsAdded = Math.max(
+            buyer.cartAnalytics.totalItemsAdded || 0,
+            cartItems.length
+        );
+        
+        if (cartItems.length > 0) {
+            buyer.cartAnalytics.averageCartValue = buyer.cart.totalPrice;
+        }
+    }
+    
+    if (buyer.isModified('notifications')) {
+        const aiNotifications = buyer.notifications.filter(n => n.type === 'ai_cart_reminder');
+        buyer.cartAnalytics.totalNotificationsSent = aiNotifications.length;
+    }
+    
+    return buyer.save();
+};
+
+// Mark notification as read
+const markNotificationAsRead = async (buyerId, notificationId) => {
+    const buyer = await Buyer.findById(buyerId);
+    if (!buyer) return null;
+    
+    const notification = buyer.notifications.id(notificationId);
+    if (notification) {
+        notification.status = 'read';
+        notification.readAt = new Date();
+    }
+    return buyer.save();
+};
+
+// Get unread notifications
+const getUnreadNotifications = async (buyerId) => {
+    const buyer = await Buyer.findById(buyerId);
+    if (!buyer) return [];
+    
+    return buyer.notifications.filter(notification => 
+        notification.status === 'sent' || notification.status === 'delivered'
+    );
+};
+
+// Get cart insights
+const getCartInsights = async (buyerId) => {
+    const buyer = await Buyer.findById(buyerId);
+    if (!buyer) return null;
+    
+    const currentTime = new Date();
+    const cartItems = buyer.cart.items || [];
+    
+    const insights = {
+        totalItems: cartItems.length,
+        totalValue: buyer.cart.totalPrice || 0,
+        oldestItem: null,
+        newestItem: null,
+        itemsNeedingAttention: [],
+        timeSinceLastActivity: null,
+        recommendedAction: 'none',
+        oldestItemAge: 0,
+        itemsOlderThan30Min: 0,
+        averageItemAge: 0,
+        riskLevel: 'low'
+    };
+    
+    if (cartItems.length > 0) {
+        let oldest = cartItems[0];
+        let newest = cartItems[0];
+        
+        const itemAges = cartItems.map(item => {
+            const itemTime = item.addedAt || item.lastUpdated || buyer.createdAt;
+            const age = Math.floor((currentTime - itemTime) / (1000 * 60));
+            
+            const oldestTime = oldest.addedAt || oldest.lastUpdated || buyer.createdAt;
+            const newestTime = newest.addedAt || newest.lastUpdated || buyer.createdAt;
+            
+            if (itemTime < oldestTime) oldest = item;
+            if (itemTime > newestTime) newest = item;
+            
+            const CART_ABANDONMENT_TIME = 30 * 60 * 1000;
+            if (currentTime - itemTime > CART_ABANDONMENT_TIME && !item.notificationSent) {
+                insights.itemsNeedingAttention.push({
+                    name: item.name,
+                    addedAgo: age
+                });
+            }
+            
+            return age;
+        });
+        
+        insights.oldestItem = {
+            name: oldest.name,
+            addedAgo: Math.floor((currentTime - (oldest.addedAt || oldest.lastUpdated)) / (1000 * 60))
+        };
+        
+        insights.newestItem = {
+            name: newest.name,
+            addedAgo: Math.floor((currentTime - (newest.addedAt || newest.lastUpdated)) / (1000 * 60))
+        };
+        
+        insights.oldestItemAge = Math.max(...itemAges);
+        insights.averageItemAge = Math.floor(itemAges.reduce((sum, age) => sum + age, 0) / itemAges.length);
+        insights.itemsOlderThan30Min = itemAges.filter(age => age > 30).length;
+        
+        if (buyer.cart.lastActivity) {
+            insights.timeSinceLastActivity = Math.floor((currentTime - buyer.cart.lastActivity) / (1000 * 60));
+        }
+        
+        if (insights.itemsNeedingAttention.length > 0) {
+            insights.recommendedAction = 'send_notification';
+        } else if (insights.totalValue > 1000) {
+            insights.recommendedAction = 'offer_discount';
+        } else if (insights.timeSinceLastActivity > 15) {
+            insights.recommendedAction = 'gentle_reminder';
+        }
+        
+        if (insights.oldestItemAge > 60 && insights.totalValue > 500) {
+            insights.riskLevel = 'high';
+        } else if (insights.oldestItemAge > 30 || insights.totalValue > 200) {
+            insights.riskLevel = 'medium';
+        }
+    }
+    
+    return insights;
+};
+
+// Find abandoned carts
+const findAbandonedCarts = async (minutesThreshold = 30) => {
+    const cutoffTime = new Date(Date.now() - (minutesThreshold * 60 * 1000));
+    
+    return Buyer.find({
+        'cart.items': { $exists: true, $ne: [] },
+        $or: [
+            { 'cart.lastActivity': { $lt: cutoffTime } },
+            { 'cart.lastActivity': { $exists: false } }
+        ]
+    });
+};
+
+// Check if item notifications are paused
+const areItemNotificationsPaused = async (buyerId, itemId) => {
+    const buyer = await Buyer.findById(buyerId);
+    if (!buyer) return false;
+    
+    const item = buyer.cart.items.find(item => item.itemId.toString() === itemId);
+    return item ? item.notificationsPaused : false;
+};
+
+// Get notification count for an item
+const getItemNotificationCount = async (buyerId, itemId) => {
+    const buyer = await Buyer.findById(buyerId);
+    if (!buyer) return 0;
+    
+    const item = buyer.cart.items.find(item => item.itemId.toString() === itemId);
+    return item ? (item.notificationCount || 0) : 0;
+};
+
+// Export the new functions
+module.exports = {
+    ...module.exports,
+    updateCartAnalytics,
+    markNotificationAsRead,
+    getUnreadNotifications,
+    getCartInsights,
+    findAbandonedCarts,
+    areItemNotificationsPaused,
+    getItemNotificationCount
 };
